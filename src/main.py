@@ -3,14 +3,18 @@ import base64
 import time
 import json
 import os
+import re
+import email
+from email import policy
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-# Gmail API scopes required for inserting messages
+# Gmail API scopes required for inserting messages and reading metadata
 SCOPES = ['https://www.googleapis.com/auth/gmail.insert', 
-          'https://www.googleapis.com/auth/gmail.labels']
+          'https://www.googleapis.com/auth/gmail.labels',
+          'https://www.googleapis.com/auth/gmail.readonly']
 
 def load_config():
     """Loads ACCOUNTS from environment variable."""
@@ -47,16 +51,61 @@ def get_gmail_service():
             
     return build('gmail', 'v1', credentials=creds)
 
-def insert_message_to_gmail(service, raw_email_bytes):
-    """Inserts a raw RFC822 email into Gmail inbox."""
+def extract_message_ids(header_value):
+    """Extracts raw Message-IDs from email headers, removing < and >."""
+    if not header_value:
+        return []
+    # Find all strings between < and >
+    return re.findall(r'<([^>]+)>', str(header_value))
+
+def find_thread_id_in_gmail(service, raw_email_bytes):
+    """
+    Parses the email to find 'In-Reply-To' or 'References',
+    searches Gmail for those IDs, and returns the existing threadId if found.
+    """
     try:
+        msg = email.message_from_bytes(raw_email_bytes, policy=policy.default)
+        
+        reply_to_ids = extract_message_ids(msg.get('In-Reply-To', ''))
+        reference_ids = extract_message_ids(msg.get('References', ''))
+        
+        # Prioritize In-Reply-To, then check References (reverse order to get latest parent first)
+        search_ids = reply_to_ids + list(reversed(reference_ids))
+        
+        for msg_id in search_ids:
+            # Gmail search operator for exact RFC822 Message-ID
+            query = f'rfc822msgid:{msg_id}'
+            response = service.users().messages().list(userId='me', q=query, maxResults=1).execute()
+            
+            if 'messages' in response and len(response['messages']) > 0:
+                found_thread_id = response['messages'][0]['threadId']
+                print(f"[*] Found existing Thread ID: {found_thread_id} via Message-ID: {msg_id}")
+                return found_thread_id
+                
+        return None
+    except Exception as e:
+        print(f"[-] Error while searching for thread ID: {str(e)}")
+        return None
+
+def insert_message_to_gmail(service, raw_email_bytes):
+    """Inserts a raw RFC822 email into Gmail inbox, maintaining threads."""
+    try:
+        # Step 1: Try to find an existing thread ID based on email headers
+        thread_id = find_thread_id_in_gmail(service, raw_email_bytes)
+        
+        # Step 2: Prepare the insert payload
         encoded_message = base64.urlsafe_b64encode(raw_email_bytes).decode('ascii')
         body = {
             'raw': encoded_message,
             'labelIds': ['INBOX', 'UNREAD']
         }
+        
+        # Step 3: Attach threadId if we found one
+        if thread_id:
+            body['threadId'] = thread_id
+            
         message = service.users().messages().insert(userId='me', body=body).execute()
-        print(f"[+] Successfully inserted message to Gmail. ID: {message['id']}")
+        print(f"[+] Successfully inserted message to Gmail. Msg ID: {message['id']}, Thread ID: {message.get('threadId', 'N/A')}")
         return True
     except HttpError as error:
         print(f"[-] An error occurred during Gmail injection: {error}")
@@ -97,7 +146,7 @@ def process_imap_account(account_config, gmail_service):
                 mail.store(e_id, '+FLAGS', '\\Seen')
                 print(f"[*] Marked email ID {e_id.decode('ascii')} as Seen on source server.")
             
-            time.sleep(1) # Simple rate limiting to avoid API quota spikes
+            time.sleep(1)
 
     except Exception as e:
         print(f"[-] Exception occurred while processing {account_config.get('name', 'Unknown')}: {str(e)}")
@@ -109,7 +158,7 @@ def process_imap_account(account_config, gmail_service):
                 pass
 
 def main():
-    print("[*] Initializing Mail Bridge...")
+    print("[*] Initializing Mail Bridge with Thread Support...")
     try:
         accounts = load_config()
         gmail_service = get_gmail_service()
