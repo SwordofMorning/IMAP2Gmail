@@ -1,8 +1,12 @@
 name: IMAP to Gmail Bridge
 
 on:
+  push:
+    branches:
+      - main
+      - master
   schedule:
-    # Runs every 30 minutes
+    # Runs every 30 minutes, 24/7
     - cron: '*/30 * * * *'
   workflow_dispatch:
     # Allows manual trigger from the GitHub Actions UI
