@@ -1,0 +1,19 @@
+# Google API Credentials
+credentials.json
+token.json
+src/credentials.json
+src/token.json
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.env
+
+# OS generated files
+.DS_Store
+Thumbs.db
